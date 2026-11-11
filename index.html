@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#020812">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Face scan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#020812;--blue:#2bb6ff;--glow:#0a8cff;--ice:#d8f4ff}
+*{box-sizing:border-box;margin:0}
+[hidden]{display:none!important}
+html,body{height:100%;background:var(--ink);color:var(--ice);font-family:"Chakra Petch",system-ui,sans-serif;overflow:hidden}
+body{display:grid;place-items:center;height:100dvh}
+#stage{position:relative;--ar:.75;width:min(100vw,calc(100dvh*var(--ar)));aspect-ratio:var(--ar);background:#000;overflow:hidden}
+#stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%}
+.mirror video,.mirror canvas{transform:scaleX(-1)}
+#intro{position:fixed;inset:0;z-index:5;display:grid;place-content:center;justify-items:center;gap:16px;text-align:center;padding:28px;background:radial-gradient(circle at 50% 35%,#0a2a52 0,var(--ink) 65%)}
+h1{font-size:44px;font-weight:700;letter-spacing:-.01em;text-shadow:0 0 28px var(--glow)}
+#intro p{max-width:28ch;line-height:1.5;color:#8fc6e6}
+.btn{font:inherit;font-weight:700;font-size:17px;color:var(--ice);padding:15px 34px;border-radius:999px;border:1.5px solid var(--blue);background:#0a8cff26;box-shadow:0 0 26px #0a8cff66,inset 0 0 14px #2bb6ff33;cursor:pointer;transition:transform .12s}
+.btn:active{transform:scale(.95)}
+.btn:disabled{opacity:.6}
+.btn:focus-visible{outline:2px solid var(--ice);outline-offset:3px}
+#err{min-height:1.4em;max-width:30ch;color:#ff9aa8;font-size:14px}
+#hud{position:fixed;top:0;left:0;right:0;z-index:3;display:flex;justify-content:center;padding:calc(env(safe-area-inset-top,0px) + 14px) 16px 0;pointer-events:none}
+#status{display:flex;align-items:center;gap:9px;font-weight:500;font-size:14px;padding:8px 16px;border-radius:999px;border:1px solid #2bb6ff55;background:#020812b8;transition:border-color .2s,box-shadow .2s}
+#status::before{content:"";width:8px;height:8px;border-radius:50%;background:#3a6a8c}
+#status.on{border-color:var(--blue);box-shadow:0 0 18px #0a8cff88}
+#status.on::before{background:var(--blue);box-shadow:0 0 8px var(--blue)}
+#flip{position:fixed;z-index:3;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 24px);font-size:15px;padding:12px 24px}
+
+/* emotion readout */
+#emo{position:fixed;z-index:3;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom,0px) + 84px);width:min(92vw,400px);padding:12px 12px 8px;border-radius:20px;border:1px solid #2bb6ff55;background:#020812c7;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);--acc:var(--ice)}
+#now{display:flex;align-items:center;gap:10px;padding:0 4px}
+#nowE{font-size:30px;line-height:1}
+#nowN{flex:1;font-size:22px;font-weight:700;color:var(--acc);text-shadow:0 0 16px var(--acc)}
+#nowP{font-size:15px;font-weight:500;color:#8fc6e6}
+#chips{display:grid;grid-template-columns:repeat(8,1fr);gap:3px;margin-top:10px}
+.chip{position:relative;text-align:center;padding:4px 0 8px;border-radius:10px;opacity:.5;transition:opacity .15s,background .15s}
+.chip span{font-size:20px;line-height:1}
+.chip.on{opacity:1;background:#2bb6ff22}
+.chip i{position:absolute;left:16%;right:16%;bottom:2px;height:3px;border-radius:2px;background:var(--c);transform:scaleX(var(--s,0));transform-origin:left}
+@media (prefers-reduced-motion:reduce){.btn,.chip{transition:none}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="v" playsinline muted></video>
+  <canvas id="c"></canvas>
+</div>
+
+<div id="hud" hidden><div id="status">Looking for a face…</div></div>
+
+<div id="emo" hidden>
+  <div id="now"><span id="nowE">😐</span><span id="nowN">Neutral</span><span id="nowP"></span></div>
+  <div id="chips"></div>
+</div>
+
+<button id="flip" class="btn" hidden>Flip camera</button>
+
+<section id="intro">
+  <h1>Face scan</h1>
+  <p>Point the camera at a face to read its expression: happy, sad, angry, laughing, sleeping and more. It runs on your device and video is never uploaded.</p>
+  <button id="go" class="btn">Start scanning</button>
+  <small id="err" role="alert"></small>
+</section>
+
+<script type="module">
+import {FaceLandmarker,FilesetResolver,DrawingUtils} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $=s=>document.querySelector(s);
+const stage=$('#stage'),video=$('#v'),cv=$('#c'),ctx=cv.getContext('2d'),st=$('#status'),go=$('#go'),err=$('#err'),
+  emoEl=$('#emo'),nowE=$('#nowE'),nowN=$('#nowN'),nowP=$('#nowP'),chipBox=$('#chips');
+// landmark indices tracing the outline of the face, used to clip the scan sweep
+const OVAL=[10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+let fl,du,stream,res,last=-1,shown='',facing='user',emos=[],lastM=null,seen=-1e9,k=1;
+
+/* ---------- emotions ---------- */
+const EMO=[['neutral','😐','Neutral','#9fd8f5'],['smiling','🙂','Smiling','#7dffb0'],['happy','😄','Happy','#ffd84a'],['laughing','😂','Laughing','#ffb347'],
+  ['surprised','😮','Surprised','#c79bff'],['sad','😢','Sad','#6aa8ff'],['angry','😠','Angry','#ff5a6e'],['sleeping','😴','Sleeping','#9aa7ff']];
+const E=Object.fromEntries(EMO.map(([id,e,n,c])=>[id,{id,e,n,c}]));
+const chips=EMO.map(([id,e,n,c])=>{
+  const d=document.createElement('div');d.className='chip';d.title=n;d.setAttribute('aria-label',n);
+  d.style.setProperty('--c',c);d.innerHTML='<span>'+e+'</span><i></i>';chipBox.append(d);return{id,d};
+});
+
+const clamp=x=>x<0?0:x>1?1:x;
+const ramp=(x,a,b)=>clamp((x-a)/(b-a));   // 0 below a, 1 above b
+const state=[];                            // per-face smoothing + sleep timer
+
+// Turns the face's blendshape values (0..1) into a 0..1 score per emotion.
+// Tune the numbers in ramp(value, low, high) if an emotion triggers too easily or too rarely.
+function score(b){
+  const m=n=>(b[n+'Left']+b[n+'Right'])/2;
+  const smile=m('mouthSmile'),cheek=m('cheekSquint'),jaw=b.jawOpen,frown=m('mouthFrown'),down=m('browDown'),
+    inner=b.browInnerUp,outer=m('browOuterUp'),wide=m('eyeWide'),squint=m('eyeSquint'),sneer=m('noseSneer'),
+    press=m('mouthPress'),blink=m('eyeBlink'),lookDn=m('eyeLookDown');
+  const open=ramp(jaw,.12,.35),grin=smile+.4*cheek;
+  return{
+    smiling:ramp(smile,.12,.28)*(1-ramp(smile,.4,.65))*(1-.5*open),
+    happy:ramp(grin,.35,.65)*(1-.8*open),
+    laughing:ramp(grin,.3,.55)*open,
+    surprised:(.4*ramp(jaw,.2,.5)+.3*ramp(wide,.15,.5)+.3*ramp((inner+outer)/2,.25,.6))*(1-ramp(smile,.2,.4)),
+    sad:(.6*ramp(frown,.05,.35)+.4*ramp(inner,.15,.5))*(1-ramp(smile,.1,.3))*(1-ramp(jaw,.25,.5)),
+    angry:(.5*ramp(down,.25,.6)+.2*ramp(sneer,.15,.5)+.15*ramp(squint,.2,.6)+.15*ramp(press,.15,.5))
+      *(1-ramp(smile,.15,.35))*(1-.6*ramp(lookDn,.3,.7))*(1-ramp(blink,.3,.7))
+  };
+}
+
+function analyze(r,now){
+  const F=r.faceBlendshapes||[],P=r.faceLandmarks||[];
+  emos=F.map((f,i)=>{
+    const s=state[i]||(state[i]={b:{},since:null,label:'neutral'}),b=s.b;
+    for(const c of f.categories){const o=b[c.categoryName];b[c.categoryName]=o===undefined?c.score:o+(c.score-o)*.4}
+    const sc=score(b);
+    // sleeping = eyes held shut for a while (a normal blink is far shorter)
+    const closed=(b.eyeBlinkLeft+b.eyeBlinkRight)/2>.5&&sc.laughing<.5;
+    if(closed){if(s.since==null)s.since=now}else s.since=null;
+    sc.sleeping=s.since==null?0:ramp((now-s.since)/1000,.8,2);
+    let top=0;for(const id in sc)if(sc[id]>top)top=sc[id];
+    sc.neutral=.7*(1-top);
+    let best='neutral';for(const id in sc)if(sc[id]>sc[best])best=id;
+    if(sc[best]>sc[s.label]+.08)s.label=best;       // small margin so the label doesn't flicker
+    return{label:s.label,sc,conf:Math.min(.99,s.label==='neutral'?1-top:sc[s.label])};
+  });
+  state.length=F.length;
+  // the biggest face drives the readout panel
+  let main=-1,ma=0;
+  P.forEach((p,i)=>{let x0=1,x1=0,y0=1,y1=0;for(const q of p){if(q.x<x0)x0=q.x;if(q.x>x1)x1=q.x;if(q.y<y0)y0=q.y;if(q.y>y1)y1=q.y}
+    const a=(x1-x0)*(y1-y0);if(a>ma){ma=a;main=i}});
+  if(emos[main]){lastM=emos[main];seen=now;renderPanel(lastM)}
+}
+
+function renderPanel(m){
+  const e=E[m.label];
+  nowE.textContent=e.e;nowN.textContent=e.n;nowP.textContent=Math.round(m.conf*100)+'%';
+  emoEl.style.setProperty('--acc',e.c);
+  for(const c of chips){c.d.classList.toggle('on',c.id===m.label);c.d.style.setProperty('--s',m.sc[c.id].toFixed(2))}
+}
+
+function pill(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath()}
+
+// label attached to each face; the canvas is mirrored by CSS on the front camera, so the text is flipped back
+function tag(bx,m){
+  const e=E[m.label],txt=e.e+' '+e.n+' '+Math.round(m.conf*100)+'%',fs=15*k,pd=9*k,mg=4*k;
+  ctx.save();
+  ctx.font='700 '+fs+'px "Chakra Petch",system-ui,sans-serif';
+  const bw=ctx.measureText(txt).width+pd*2,bh=fs*1.15+pd*1.1;
+  const x=Math.min(Math.max((bx.a+bx.c)/2-bw/2,mg),cv.width-bw-mg);
+  let y=bx.b-bh-6*k;if(y<mg)y=Math.min(bx.d+6*k,cv.height-bh-mg);
+  ctx.translate(x+bw/2,y+bh/2);
+  if(facing==='user')ctx.scale(-1,1);
+  pill(-bw/2,-bh/2,bw,bh,bh/2);
+  ctx.fillStyle='#020812d9';ctx.fill();
+  ctx.lineWidth=1.5*k;ctx.strokeStyle=e.c;ctx.shadowColor=e.c;ctx.shadowBlur=10*k;ctx.stroke();
+  ctx.shadowBlur=0;ctx.fillStyle='#d8f4ff';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(txt,0,fs*.05);
+  ctx.restore();
+}
+
+/* ---------- tracker ---------- */
+async function loadModel(){
+  const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  const make=d=>FaceLandmarker.createFromOptions(fs,{
+    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",delegate:d},
+    runningMode:"VIDEO",numFaces:2,outputFaceBlendshapes:true
+  });
+  try{return await make("GPU")}catch{return await make("CPU")}
+}
+
+const fit=()=>{k=cv.width/(stage.clientWidth||cv.width)};   // canvas pixels per screen pixel
+
+async function cam(){
+  stream?.getTracks().forEach(t=>t.stop());
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream;
+  await video.play();
+  cv.width=video.videoWidth;cv.height=video.videoHeight;
+  stage.style.setProperty('--ar',cv.width/cv.height);
+  stage.classList.toggle('mirror',facing==='user');
+  fit();
+  last=-1;res=null;emos=[];state.length=0;lastM=null;
+}
+addEventListener('resize',()=>{if(cv.width)fit()});
+
+function draw(p,now,u,w,h){
+  let x0=1,y0=1,x1=0,y1=0;
+  for(const q of p){if(q.x<x0)x0=q.x;if(q.x>x1)x1=q.x;if(q.y<y0)y0=q.y;if(q.y>y1)y1=q.y}
+  x0*=w;x1*=w;y0*=h;y1*=h;
+  const T=FaceLandmarker.FACE_LANDMARKS_TESSELATION;
+
+  // 1. the full mesh, thin and blue
+  du.drawConnectors(p,T,{color:'rgba(43,182,255,.4)',lineWidth:.8*u});
+  ctx.fillStyle='rgba(170,230,255,.75)';ctx.beginPath();
+  for(const q of p){ctx.moveTo(q.x*w+1.1*u,q.y*h);ctx.arc(q.x*w,q.y*h,1.1*u,0,6.283)}
+  ctx.fill();
+
+  // 2. glowing contours: eyes, brows, lips, jaw, irises
+  ctx.shadowColor='#0a8cff';ctx.shadowBlur=12*u;
+  du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_CONTOURS,{color:'#7fdcff',lineWidth:1.8*u});
+  du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS,{color:'#fff',lineWidth:1.6*u});
+  du.drawConnectors(p,FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS,{color:'#fff',lineWidth:1.6*u});
+  ctx.shadowBlur=0;
+
+  // 3. scan sweep, clipped to the face: trailing glow, bright mesh at the beam, beam line
+  const H=y1-y0,ys=y0+H*((now/1900)%1),tr=H*.35;
+  ctx.save();
+  ctx.beginPath();OVAL.forEach((i,j)=>ctx[j?'lineTo':'moveTo'](p[i].x*w,p[i].y*h));ctx.closePath();ctx.clip();
+  const g=ctx.createLinearGradient(0,ys-tr,0,ys);
+  g.addColorStop(0,'rgba(10,140,255,0)');g.addColorStop(1,'rgba(40,190,255,.38)');
+  ctx.fillStyle=g;ctx.fillRect(x0,ys-tr,x1-x0,tr);
+  ctx.save();
+  ctx.beginPath();ctx.rect(x0,ys-H*.12,x1-x0,H*.15);ctx.clip();
+  du.drawConnectors(p,T,{color:'#e6f8ff',lineWidth:1.3*u});
+  ctx.restore();
+  ctx.shadowColor='#2bb6ff';ctx.shadowBlur=16*u;ctx.strokeStyle='#d8f4ff';ctx.lineWidth=2*u;
+  ctx.beginPath();ctx.moveTo(x0,ys);ctx.lineTo(x1,ys);ctx.stroke();
+  ctx.restore();
+
+  // 4. lock-on corner brackets
+  const pad=.06*(x1-x0),a=x0-pad,b=y0-pad,c=x1+pad,d=y1+pad,L=.22*(c-a);
+  ctx.strokeStyle='#2bb6ff';ctx.lineWidth=3*u;ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.shadowColor='#0a8cff';ctx.shadowBlur=10*u;
+  ctx.beginPath();
+  [[a,b,1,1],[c,b,-1,1],[a,d,1,-1],[c,d,-1,-1]].forEach(([X,Y,sx,sy])=>{ctx.moveTo(X+sx*L,Y);ctx.lineTo(X,Y);ctx.lineTo(X,Y+sy*L)});
+  ctx.stroke();ctx.shadowBlur=0;
+  return{a,b,c,d};
+}
+
+function loop(now){
+  requestAnimationFrame(loop);
+  if(video.readyState<2)return;
+  const w=cv.width,h=cv.height;
+  ctx.clearRect(0,0,w,h);
+  if(video.currentTime!==last){last=video.currentTime;res=fl.detectForVideo(video,now);analyze(res,now)}
+  const faces=res?.faceLandmarks||[];
+  const msg=faces.length>1?faces.length+' faces locked':faces.length?'Face locked':'Looking for a face…';
+  if(msg!==shown){shown=msg;st.textContent=msg;st.classList.toggle('on',faces.length>0)}
+  const u=w/640;
+  faces.forEach((p,i)=>{const bx=draw(p,now,u,w,h);if(emos[i])tag(bx,emos[i])});
+  const show=!!lastM&&now-seen<600;     // keep the panel briefly if tracking drops for a moment
+  if(emoEl.hidden===show)emoEl.hidden=!show;
+}
+
+go.onclick=async()=>{
+  go.disabled=true;go.textContent='Loading tracker…';err.textContent='';
+  try{
+    fl=await loadModel();du=new DrawingUtils(ctx);
+    await cam();
+    $('#intro').hidden=true;$('#hud').hidden=false;$('#flip').hidden=false;
+    requestAnimationFrame(loop);
+  }catch(e){
+    go.disabled=false;go.textContent='Try again';
+    err.textContent=e.name==='NotAllowedError'?'Camera access is blocked. Allow it in your browser settings, then try again.':'Could not start: '+(e.message||e.name);
+  }
+};
+
+$('#flip').onclick=async()=>{
+  const prev=facing;facing=facing==='user'?'environment':'user';
+  try{await cam()}catch{facing=prev;await cam().catch(()=>{})}
+};
+</script>
+</body>
+</html>
